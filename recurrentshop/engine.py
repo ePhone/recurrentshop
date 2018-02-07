@@ -276,7 +276,9 @@ class RecurrentModel(Recurrent):
         inputs = [input]
         outputs = [output]
         state_spec = None
+        self.has_initial_states = False # a flag for check has initial states. For offer state come from layer state or readout
         if initial_states is not None:
+            self.has_initial_states  = True 
             if type(initial_states) not in [list, tuple]:
                 initial_states = [initial_states]
             state_spec = [InputSpec(shape=K.int_shape(state)) for state in initial_states]
@@ -456,11 +458,12 @@ class RecurrentModel(Recurrent):
                 else:
                     inputs.append(initial_state)
             else:
+                num_states_temp = self.num_states # For offer state come from layer state or readout
                 if self.readout:
-                    initial_state = self._get_optional_input_placeholder('initial_state', self.num_states - 1)
-                else:
-                    initial_state = self._get_optional_input_placeholder('initial_state', self.num_states)
-                inputs += _to_list(initial_state)
+                    num_states_temp -= 1
+                if num_states_temp > 0:
+                    initial_state = self._get_optional_input_placeholder('initial_state', num_states_temp)
+                    inputs += _to_list(initial_state)
             if self.readout:
                 if initial_readout is None:
                     initial_readout = self._get_optional_input_placeholder('initial_readout')
@@ -487,7 +490,10 @@ class RecurrentModel(Recurrent):
             input_shape = _collect_input_shape(inputs)
             output = self.call(inputs, **kwargs)
             output_mask = self.compute_mask(inputs[0], previous_mask)
-            output_shape = self.compute_output_shape(input_shape[0])
+            if len(inputs) == 1:
+                output_shape = self.compute_output_shape(input_shape) # if only one input, input_shape will be a int
+            else:
+                output_shape = self.compute_output_shape(input_shape[0])
             self._add_inbound_node(input_tensors=inputs, output_tensors=output,
                                    input_masks=previous_mask, output_masks=output_mask,
                                    input_shapes=input_shape, output_shapes=output_shape,
@@ -694,7 +700,8 @@ class RecurrentModel(Recurrent):
             else:
                 input_shape = self._remove_time_dim(input_shape)
         input_shape = _to_list(input_shape)
-        input_shape = [input_shape[0]] + [K.int_shape(state) for state in self.model.input[1:]]
+        if type(self.model.input) is list: # Debug for no state input
+            input_shape = [input_shape[0]] + [K.int_shape(state) for state in self.model.input[1:]]
         output_shape = self.model.compute_output_shape(input_shape)
         if type(output_shape) is list:
             output_shape = output_shape[0]
@@ -795,6 +802,8 @@ class RecurrentModel(Recurrent):
         config = {'model_config': self.model.get_config(),
                   'decode': self.decode,
                   'output_length': self.output_length,
+				  'readout': self.readout, # add readout flag
+				  'has_initial_states' : self.has_initial_states , # add has initial states flag. For offer state come from layer state or readout 
                   'return_states': self.return_states,
                   'state_initializer': self._serialize_state_initializer()            
                   }
@@ -808,24 +817,39 @@ class RecurrentModel(Recurrent):
             custom_objects = {obj.__name__: obj for obj in custom_objects}
         custom_objects.update(_get_cells())
         config = config.copy()
+        readout = config.pop('readout') # Get readout flag and set it in model
+        config.pop('readout',None) # Delete the flog to avoid other bugs
+        has_initial_states = config.pop('has_initial_states') # Get has initial states flag and set it in model
+        config.pop('has_initial_states',None) # Delete the flog to avoid other bugs
+
+        initial_states = None ## Initialization of initial_states, final_states and readout_input
+        final_states = None
+        readout_input = None
         model_config = config.pop('model_config')
+
         if model_config is None:
             model = None
         else:
             model = Model.from_config(model_config, custom_objects)
         if type(model.input) is list:
             input = model.input[0]
-            initial_states = model.input[1:]
+            num_states = len(model.input) # Get num of states
+            if readout: # Check readout
+                readout_input = model.input[num_states - 1] # Set readout_input
+                num_states -= 1 
+            if has_initial_states: # Check other states
+                initial_states = model.input[1:num_states] # Set initial_states
         else:
             input = model.input
             initial_states = None
         if type(model.output) is list:
             output = model.output[0]
-            final_states = model.output[1:]
+            if has_initial_states: # Check other states for final_states
+                final_states = model.output[1:] # Set initial_states
         else:
             output = model.output
-            final_states = None
-        return cls(input, output, initial_states, final_states, **config)
+
+        return cls(input, output, initial_states, final_states, readout_input, **config)
 
     def get_cell(self, **kwargs):
         return RNNCellFromModel(self.model, **kwargs)
